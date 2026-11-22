@@ -401,7 +401,7 @@ async function studentStart(){
   };
   bindTeacherLink();
 }
-function teacherLink(){ return ""; return `<p class="center"><button class="linkish" id="tlink">כניסת מורה</button></p>`; }
+function teacherLink(){ return `<p class="center"><button class="linkish" id="tlink">כניסת מורה</button></p>`; }
 function bindTeacherLink(){ const b=document.getElementById("tlink"); if(b) b.onclick=teacherLogin; }
 
 function renderQuestion(){
@@ -479,12 +479,14 @@ function encodeSub(sub){ const j=JSON.stringify({v:1,t:config.title,s:sub}); ret
 function decodeSubs(text){ const out=[]; (String(text).match(/QZ1:[A-Za-z0-9+\/=]+/g)||[]).forEach(c=>{ try{ out.push(JSON.parse(decodeURIComponent(escape(atob(c.slice(4))))).s); }catch(e){} }); return out; }
 function showSubmitCode(sub){
   const code=encodeSub(sub);
-  app.innerHTML=`<div class="narrow panel frame stack"><h1>כמעט סיימת! 🎉</h1>
-    <p><b>שלב אחרון:</b> העתיקו את קוד ההגשה ושלחו אותו למורה בוואטסאפ. בלי הקוד, המורה לא תקבל את התשובות שלכם.</p>
+  app.innerHTML=`<div class="narrow panel frame stack"><h1>ההגשה לא נשלחה</h1>
+    <p>כנראה שאין כרגע חיבור לאינטרנט. כדי שהתשובות לא ילכו לאיבוד, העתיקו את הקוד ושלחו אותו למורה בוואטסאפ.</p>
+    <button class="btn block" id="retry">🔄 לנסות לשלוח שוב</button>
     <textarea id="code" readonly style="min-height:120px;font-size:.8rem;direction:ltr">${esc(code)}</textarea>
     <button class="btn primary block" id="copy">📋 העתקת הקוד</button>
     <p class="sub">אם ההעתקה לא עובדת, לחצו לחיצה ארוכה על הקוד ובחרו "העתק".</p></div>`;
   const ta=document.getElementById("code"); ta.onclick=()=>ta.select();
+  const rt=document.getElementById("retry"); if(rt) rt.onclick=async()=>{ rt.disabled=true; rt.textContent="שולח…"; if(await sset("sub:"+sub.id,JSON.stringify(sub),true)){ app.innerHTML=`<div class="narrow panel frame center stack"><div class="done">🎉</div><h1>ההגשה התקבלה</h1><p>תודה, ${esc(sub.name)}!</p></div>`; } else { rt.disabled=false; rt.textContent="🔄 לנסות לשלוח שוב"; toast("עדיין אין חיבור ("+lastErr+")"); } };
   document.getElementById("copy").onclick=async()=>{ ta.select(); let ok=false; try{ await navigator.clipboard.writeText(code); ok=true; }catch(e){ try{ ok=document.execCommand("copy"); }catch(e2){} } toast(ok?"הקוד הועתק. עכשיו שלחו אותו למורה":"סמנו את הקוד והעתיקו אותו ידנית"); };
 }
 function importCodes(){
@@ -524,12 +526,11 @@ function teacherHome(){
     <h1>🔗 ${esc(config.title)} (${esc(config.date)})</h1><div class="sub">מבדק דיגיטלי לתלמידים ${config.open?"פתוח להגשות":"סגור להגשות"}</div>
     <button class="btn soft block" id="toDash">🧑‍🏫 עמוד המורה (ציונים, אקסל, טפסים)</button>
     <button class="btn soft block" id="toEdit">✏️ עריכה</button>
-    <button class="btn primary block" id="toStudent">👀 תצוגה כמו תלמיד</button>
-    <div class="note"><b>איך שולחים לתלמידים:</b> פרסמו את הקובץ (כפתור השיתוף או "Publish") ושלחו את הקישור שמתקבל. התלמידים נכנסים ישר למבדק, ואת נכנסת דרך אותו קישור עם "כניסת מורה" והקוד שלך.</div>
+    
+    <div class="note">את הקישור לאתר (בלי teacher.html) שולחים לתלמידים. ההגשות נשמרות בגיליון Google שלך ומופיעות כאן.</div>
   </div>`;
   document.getElementById("toDash").onclick=dashboard;
   document.getElementById("toEdit").onclick=editor;
-  document.getElementById("toStudent").onclick=()=>{ teacherOK=false; studentStart(); };
 }
 
 async function loadSubs(){
@@ -947,11 +948,72 @@ function shrinkImage(file){
     x.fillStyle="#fff"; x.fillRect(0,0,c.width,c.height); x.drawImage(im,0,0,c.width,c.height); res(c.toDataURL("image/jpeg",0.75)); };
     im.src=r.result; }; r.readAsDataURL(file); });
 }
+
+/* ===== גרסת אתר: אחסון ב-Google Sheets ===== */
+const SCRIPT_URL="https://script.google.com/macros/s/AKfycbyILvlDj0dLu-Tr5z5kxt9RkByrH1A2C2Q9fNJyTWgKjoG6UHsVUg9WI__X00tj1jD5/exec";
+const SITE_MODE="student";
+let TKEY=""; try{ TKEY=localStorage.getItem("tkey")||""; }catch(e){}
+let NOTES={};
+async function gas(body){
+  const r=await fetch(SCRIPT_URL,{method:"POST",headers:{"Content-Type":"text/plain;charset=utf-8"},body:JSON.stringify(body)});
+  const j=await r.json(); if(!j.ok) throw {code:j.error||"error",message:j.error||"error"}; return j;
+}
+function gasErr(e){ const c=e&&e.code; return c==="key"?"קוד המורה שגוי":c==="closed"?"המבדק סגור":(e&&e.message)||"אין חיבור לאינטרנט"; }
+function storageOK(){ return true; }
+async function sget(k, sh){
+  if(!sh) return lget(k);
+  if(k==="quiz-config"){ try{ const j=await gas({action:"getconfig"}); return j.config||null; }catch(e){ return null; } }
+  if(k.startsWith("note:")) return NOTES[k.slice(5)]||"";
+  return null;
+}
+async function sset(k, v, sh){
+  if(!sh) return lset(k)(v);
+  try{
+    if(k.startsWith("sub:")){ const sub=JSON.parse(v); await gas({action:"submit",sub,score:grade(sub).score}); return true; }
+    if(k==="quiz-config"){ await gas({action:"setconfig",key:TKEY,config:v}); return true; }
+    if(k.startsWith("note:")){ await gas({action:"note",key:TKEY,id:k.slice(5),text:v}); NOTES[k.slice(5)]=v; return true; }
+    if(k.startsWith("audio:")){ lastErr="הקלטות לא נשמרות בגרסת האתר"; return false; }
+  }catch(e){ console.error(e); lastErr=gasErr(e); return false; }
+  return false;
+}
+async function sdel(k, sh){
+  if(!sh){ try{ localStorage.removeItem(k); }catch(e){} return true; }
+  try{ if(k.startsWith("sub:")){ await gas({action:"delete",key:TKEY,id:k.slice(4)}); return true; }
+    if(k.startsWith("note:")){ await gas({action:"note",key:TKEY,id:k.slice(5),text:""}); return true; } }
+  catch(e){ lastErr=gasErr(e); toast("המחיקה נכשלה ("+lastErr+")"); }
+  return false;
+}
+async function slist(p, sh){ return []; }
+async function loadAllSubs(){ const j=await gas({action:"list",key:TKEY}); NOTES=j.notes||{}; subDoc={}; (j.subs||[]).forEach(s=>subDoc[s.id]="x"); return j.subs||[]; }
+async function saveFile(blob, name){ const a=document.createElement("a"); a.href=URL.createObjectURL(blob); a.download=name; document.body.appendChild(a); a.click(); setTimeout(()=>{ URL.revokeObjectURL(a.href); a.remove(); },4000); return true; }
+function teacherLink(){ return ""; }
+function errText(e){ return gasErr(e); }
+function importCodes(){
+  const bg=document.createElement("div"); bg.className="modalBg";
+  bg.innerHTML=`<div class="modal narrow stack" role="dialog" aria-modal="true"><h2>הוספת הגשות מקוד</h2>
+    <p class="sub">אם תלמיד שלח קוד הגשה (למשל כשלא היה לו אינטרנט בזמן ההגשה), הדביקו אותו כאן.</p>
+    <textarea id="codes" style="min-height:140px;direction:ltr"></textarea>
+    <div class="row"><button class="btn primary" id="impGo">הוספה</button><button class="btn" id="impNo">ביטול</button></div></div>`;
+  document.body.appendChild(bg);
+  bg.querySelector("#impNo").onclick=()=>bg.remove();
+  bg.querySelector("#impGo").onclick=async()=>{
+    const list=decodeSubs(bg.querySelector("#codes").value); if(!list.length){ toast("לא נמצא קוד תקין"); return; }
+    let n=0; for(const x of list){ if(x&&x.id&&!subDoc[x.id]){ try{ await gas({action:"submit",sub:x,score:grade(x).score}); n++; }catch(e){} } }
+    bg.remove(); toast(n?`נוספו ${n} הגשות`:"ההגשות האלה כבר קיימות"); await loadSubs(); renderDash();
+  };
+}
+function teacherGate(){
+  app.innerHTML=`<div class="narrow panel frame stack"><h1>🧑‍🏫 עמוד המורה</h1><div class="sub">${esc(config.title)}</div>
+    <label class="f" for="tk">קוד מורה</label><input id="tk" type="password" autocomplete="current-password" value="${esc(TKEY)}">
+    <button class="btn primary block" id="tkGo">כניסה</button></div>`;
+  const go=async()=>{ TKEY=document.getElementById("tk").value.trim(); const b=document.getElementById("tkGo"); b.disabled=true; b.textContent="בודק…";
+    try{ await gas({action:"list",key:TKEY}); try{ localStorage.setItem("tkey",TKEY); }catch(e){} teacherOK=true; teacherHome(); }
+    catch(e){ b.disabled=false; b.textContent="כניסה"; toast(gasErr(e)); } };
+  document.getElementById("tkGo").onclick=go; document.getElementById("tk").onkeydown=e=>{ if(e.key==="Enter") go(); };
+}
+
 /* ---------- הפעלה ---------- */
-(async()=>{ await loadConfig(); await studentStart();
-  if(false){ const n=document.createElement("div"); n.className="note"; n.style.margin="0 auto 12px"; n.style.maxWidth="620px";
-    n.textContent="לשמירת ההגשה צריך להיות מחוברים לחשבון Claude. אפשר לפתור את הבוחן גם כך, ובסוף תקבלו קוד לשליחה למורה."; app.prepend(n); }
-})();
+(async()=>{ await loadConfig(); await studentStart(); })();
 </script>
 </body>
 </html>
